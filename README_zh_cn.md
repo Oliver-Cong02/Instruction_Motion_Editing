@@ -119,9 +119,9 @@ python3 local_infer.py --model_path ckpts/tencent/HY-Motion-1.0-Lite
 - `--output_dir`: 结果保存目录 (默认: `output/local_infer`)。
 - `--disable_duration_est`: 禁用基于 LLM 的时长预估。
 - `--disable_rewrite`: 禁用基于 LLM 的提示词重写。
-- `--prompt_engineering_host`: （可选）动作时长预测和提示词重写模块的主机地址。
+- `--prompt_engineering_host` / `--prompt_engineering_model_path`: （可选）动作时长预测和提示词重写模块的主机地址/本地路径。
     - **下载地址**: 您可以从 [此处](https://huggingface.co/Text2MotionPrompter/Text2MotionPrompter) 下载动作时长预测和提示词重写模块。
-    - **注意**: 如果您**不**设置此参数，则必须同时设置 --disable_duration_est 和 --disable_rewrite。否则，脚本将因无法访问重写服务而报错。
+    - **注意**: 如果您**不**设置此参数，则必须同时设置 `--disable_duration_est` 和 `--disable_rewrite`。否则，脚本将因无法访问重写服务而报错。
 
 ### Gradio 应用
 
@@ -150,4 +150,4 @@ python3 gradio_app.py
 
 ## 致谢
 
-我们要感谢 [FLUX](https://github.com/black-forest-labs/flux), [diffusers](https://github.com/huggingface/diffusers), [HuggingFace](https://huggingface.co), [SMPL](https://smpl.is.tue.mpg.de/)/[SMPLH](https://mano.is.tue.mpg.de/), [CLIP](https://github.com/openai/CLIP), [Qwen3](https://github.com/QwenLM/Qwen3), [PyTorch3D](https://github.com/facebookresearch/pytorch3d), [kornia](https://github.com/kornia/kornia), [transforms3d](https://github.com/matthew-brett/transforms3d), [FBX-SDK](https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2020-0), [GVHMR](https://zju3dv.github.io/gvhmr/) 和 [HunyuanVideo](https://github.com/Tencent-Hunyuan/HunyuanVideo) 仓库或工具的贡献者们，感谢他们的开放研究与探索.
+我们要感谢 [FLUX](https://github.com/black-forest-labs/flux), [diffusers](https://github.com/huggingface/diffusers), [HuggingFace](https://huggingface.co), [SMPL](https://smpl.is.tue.mpg.de/)/[SMPLH](https://mano.is.tue.mpg.de/), [CLIP](https://github.com/openai/CLIP), [Qwen3](https://github.com/QwenLM/Qwen3), [PyTorch3D](https://github.com/facebookresearch/pytorch3d), [kornia](https://github.com/kornia/kornia), [transforms3d](https://github.com/matthew-brett/transforms3d), [FBX-SDK](https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2020-0), [GVHMR](https://zju3dv.github.io/gvhmr/) 和 [HunyuanVideo](https://github.com/Tencent-Hunyuan/HunyuanVideo) 仓库或工具的贡献者们，感谢他们的开放研究与探索。

@@ -118,9 +118,9 @@ python3 local_infer.py --model_path ckpts/tencent/HY-Motion-1.0-Lite
 - `--output_dir`: Directory to save results (default: `output/local_infer`).
 - `--disable_duration_est`: Disable LLM-based duration estimation.
 - `--disable_rewrite`: Disable LLM-based prompt rewriting.
-- `--prompt_engineering_host`: (Optional) Host address for the Duration Prediction & Prompt Rewrite Module.
+- `--prompt_engineering_host` / `--prompt_engineering_model_path`: (Optional) Host address / local checkpoint for the Duration Prediction & Prompt Rewrite Module.
     - **Download**: You can download the Duration Prediction & Prompt Rewrite Module from [Here](https://huggingface.co/Text2MotionPrompter/Text2MotionPrompter).
-    - **Note**: If you **do not** set this parameter, you must also set `--disable_duration_est` and `--disable_rewrite`. Otherwise, the script will raise an error due to host unavailable.
+    - **Note**: If you **do not** set these  parameter, you must also set `--disable_duration_est` and `--disable_rewrite`. Otherwise, the script will raise an error due to host unavailable.
 
 
 ### Gradio App
