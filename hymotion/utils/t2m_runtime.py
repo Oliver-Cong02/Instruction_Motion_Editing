@@ -11,6 +11,7 @@ import yaml
 from ..prompt_engineering.prompt_rewrite import PromptRewriter
 from .loaders import load_object
 from .visualize_mesh_web import save_visualization_data, generate_static_html_content
+from .type_converter import get_module_device
 
 try:
     import fbx
@@ -268,7 +269,6 @@ class T2MRuntime:
     def generate_text_embeddings(
         self,
         text: str,
-        seeds_csv: str,
         use_special_game_feat: bool = False,
     ) -> Tuple[Union[str, list[str]], dict]:
         self.load()
@@ -276,35 +276,67 @@ class T2MRuntime:
         try:
             pipeline = self.pipelines[pi]
             pipeline.eval()
-
-            # When skip_text=True (debug mode), use blank text features
-            if self.skip_text:
-                print(">>> [Debug Mode] Using blank text features (skip_text=True)")
-                device = next(pipeline.parameters()).device
-                batch_size = len(seeds) if seeds else 1
-                # Create blank hidden_state_dict using null features
-                hidden_state_dict = {
-                    "text_vec_raw": pipeline.null_vtxt_feat.expand(batch_size, -1, -1).to(device),
-                    "text_ctxt_raw": pipeline.null_ctxt_input.expand(batch_size, -1, -1).to(device),
-                    "text_ctxt_raw_length": torch.tensor([1] * batch_size, device=device),
-                }
-                # Disable CFG in debug mode (use cfg_scale=1.0)
-                model_output = pipeline.generate(
-                    text,
-                    seeds,
-                    duration,
-                    cfg_scale=1.0,
-                    use_special_game_feat=False,
-                    hidden_state_dict=hidden_state_dict,
-                )
-            else:
-                model_output = pipeline.generate_text_embedding(
-                    text, use_special_game_feat=use_special_game_feat
-                )
+            model_output = pipeline.generate_text_embedding(
+                text, use_special_game_feat=use_special_game_feat
+            )
         finally:
             self._release_pipeline(pi)
         
-        breakpoint()
+        return model_output
+
+    def vis_motion_latent(
+        self,
+        latent,
+        text,
+        output_dir,
+        output_filename,
+        output_format,
+    ):
+        self.load()
+        pi = self._acquire_pipeline()
+        try:
+            pipeline = self.pipelines[pi]
+            pipeline.eval()
+            device = get_module_device(pipeline)
+            if len(latent.shape) == 2:
+                latent = latent.unsqueeze(0)
+            output_dict = pipeline.decode_motion_from_latent(latent.to(device), should_apply_smooothing=True)
+        finally:
+            self._release_pipeline(pi)
+        
+        ts = _now()
+        save_data, base_filename = save_visualization_data(
+            output=output_dict,
+            text=text,
+            rewritten_text=text,
+            timestamp=ts,
+            output_dir=output_dir,
+            output_filename=output_filename,
+        )
+
+        html_content = self._generate_html_content(
+            timestamp=ts,
+            file_path=base_filename,
+            output_dir=output_dir,
+        )
+
+        if output_format == "fbx" and not self.fbx_available:
+            print(">>> Warning: FBX export requested but FBX SDK is not available. Falling back to dict format.")
+            output_format = "dict"
+
+        if output_format == "fbx" and self.fbx_available:
+            fbx_files = self._generate_fbx_files(
+                visualization_data=save_data,
+                output_dir=output_dir,
+                fbx_filename=output_filename,
+            )
+            return html_content, fbx_files, output_dict
+        elif output_format == "dict":
+            # Return HTML content and empty list for fbx_files when using dict format
+            return html_content, [], output_dict
+        else:
+            raise ValueError(f">>> Invalid output format: {output_format}")
+
 
 
 
@@ -364,7 +396,7 @@ class T2MRuntime:
             output_filename=output_filename,
         )
 
-        html_content = self._generate_html_content(
+        self._generate_html_content(
             timestamp=ts,
             file_path=base_filename,
             output_dir=output_dir,
@@ -372,20 +404,13 @@ class T2MRuntime:
 
         if output_format == "fbx" and not self.fbx_available:
             print(">>> Warning: FBX export requested but FBX SDK is not available. Falling back to dict format.")
-            output_format = "dict"
-
-        if output_format == "fbx" and self.fbx_available:
-            fbx_files = self._generate_fbx_files(
-                visualization_data=save_data,
-                output_dir=output_dir,
-                fbx_filename=output_filename,
-            )
-            return html_content, fbx_files, model_output
-        elif output_format == "dict":
-            # Return HTML content and empty list for fbx_files when using dict format
-            return html_content, [], model_output
-        else:
             raise ValueError(f">>> Invalid output format: {output_format}")
+
+        self._generate_fbx_files(
+            visualization_data=save_data,
+            output_dir=output_dir,
+            fbx_filename=output_filename,
+        )
 
     def _generate_html_content(
         self,

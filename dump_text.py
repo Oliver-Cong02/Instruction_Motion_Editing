@@ -13,6 +13,9 @@ def process_single_embedding(
     data: dict,
     disable_rewrite: bool = False,
     disable_duration_est: bool = False,
+    vis_motion: bool = False,
+    output_dir: str = './vis',
+    output_filename: str = 'vis',
 ) -> Dict[str, Any]:
     """
     处理单个样本的文本，获取 Embedding。
@@ -32,12 +35,25 @@ def process_single_embedding(
         if disable_rewrite:
             rewritten_text = text
             
-    # 2. 调用核心 Embedding 生成函数 (你需要在 Runtime 中实现此方法)
-    # 假设返回的是 Tensor 或 Numpy Array
     embedding = runtime.generate_text_embeddings(text=rewritten_text)
 
-    if isinstance(embedding, torch.Tensor):
-        embedding = embedding.detach().cpu()
+    if vis_motion:
+        fbx_ok = getattr(runtime, "fbx_available", False)
+        req_format = "fbx" if fbx_ok else "dict"
+        runtime.vis_motion_latent(
+            latent=data['src_latent'],
+            text=text,
+            output_dir=output_dir,
+            output_filename=output_filename+"_src",
+            output_format=req_format,
+        )
+        runtime.vis_motion_latent(
+            latent=data['tgt_latent'],
+            text=rewritten_text,
+            output_dir=output_dir,
+            output_filename=output_filename+"_tgt",
+            output_format=req_format,
+        )
 
     return {
         "key": key,
@@ -55,6 +71,8 @@ def run_parallel_embedding_tasks(
     disable_rewrite: bool = False,
     disable_duration_est: bool = False,
     max_workers: Optional[int] = None,
+    vis_motion: bool = False,
+    output_dir: str = './vis',
 ) -> Dict[str, Any]:
     """
     并行处理数据集中的文本提取 Embedding
@@ -79,7 +97,10 @@ def run_parallel_embedding_tasks(
                 key=key,
                 data=data,
                 disable_rewrite=disable_rewrite,
-                disable_duration_est=disable_duration_est
+                disable_duration_est=disable_duration_est,
+                vis_motion=vis_motion,
+                output_dir=output_dir,
+                output_filename=key,
             )
             futures[fut] = key
 
@@ -115,6 +136,8 @@ def main():
     parser.add_argument("--dataset_path", type=str, required=True, help="")
     parser.add_argument("--output_path", type=str, default="output_embeddings.pt", help="Path to save result dict")
     parser.add_argument("--device_ids", type=str, default=None, help="GPU device ID list")
+    parser.add_argument("--vis_motion", action="store_true", help="Visualize motion")
+    parser.add_argument("--output_dir", type=str, default="output/vis_motion", help="Output directory")
     
     # LLM 相关参数
     parser.add_argument("--prompt_engineering_model_path", type=str, default=None)
@@ -141,6 +164,10 @@ def main():
         prompt_engineering_model_path=args.prompt_engineering_model_path,
     )
 
+    # create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+
     dataset_dict_raw = joblib.load(args.dataset_path)
 
     embeddings_map = run_parallel_embedding_tasks(
@@ -148,6 +175,8 @@ def main():
         dataset_dict=dataset_dict_raw,
         disable_rewrite=args.disable_rewrite,
         disable_duration_est=True,
+        vis_motion=args.vis_motion,
+        output_dir=args.output_dir,
     )
 
     print(f">>> Saving {len(embeddings_map)} embeddings to {args.output_path}")
