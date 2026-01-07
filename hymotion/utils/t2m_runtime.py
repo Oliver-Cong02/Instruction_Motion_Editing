@@ -265,6 +265,49 @@ class T2MRuntime:
         print(f"\t>>> Rewritten text: {rewritten_text}, duration: {duration:.2f} seconds")
         return duration, rewritten_text
 
+    def generate_text_embeddings(
+        self,
+        text: str,
+        seeds_csv: str,
+        use_special_game_feat: bool = False,
+    ) -> Tuple[Union[str, list[str]], dict]:
+        self.load()
+        pi = self._acquire_pipeline()
+        try:
+            pipeline = self.pipelines[pi]
+            pipeline.eval()
+
+            # When skip_text=True (debug mode), use blank text features
+            if self.skip_text:
+                print(">>> [Debug Mode] Using blank text features (skip_text=True)")
+                device = next(pipeline.parameters()).device
+                batch_size = len(seeds) if seeds else 1
+                # Create blank hidden_state_dict using null features
+                hidden_state_dict = {
+                    "text_vec_raw": pipeline.null_vtxt_feat.expand(batch_size, -1, -1).to(device),
+                    "text_ctxt_raw": pipeline.null_ctxt_input.expand(batch_size, -1, -1).to(device),
+                    "text_ctxt_raw_length": torch.tensor([1] * batch_size, device=device),
+                }
+                # Disable CFG in debug mode (use cfg_scale=1.0)
+                model_output = pipeline.generate(
+                    text,
+                    seeds,
+                    duration,
+                    cfg_scale=1.0,
+                    use_special_game_feat=False,
+                    hidden_state_dict=hidden_state_dict,
+                )
+            else:
+                model_output = pipeline.generate_text_embedding(
+                    text, use_special_game_feat=use_special_game_feat
+                )
+        finally:
+            self._release_pipeline(pi)
+        
+        breakpoint()
+
+
+
     def generate_motion(
         self,
         text: str,

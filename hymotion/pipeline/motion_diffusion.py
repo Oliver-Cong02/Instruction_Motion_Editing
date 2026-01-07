@@ -589,6 +589,59 @@ class MotionFlowMatching(MotionGeneration):
         }
 
 
+
+    @torch.no_grad()
+    def generate_text_embedding(
+        self,
+        text: Union[str, List[str]],
+        use_special_game_feat: bool = False,
+        hidden_state_dict=None,
+    ) -> Dict[str, Any]:
+        repeat = 1
+        if isinstance(text, list):
+            assert len(text) == 1, f"len(text) must equal len(seed_input), got {len(text)} vs {repeat}"
+            text_list = text
+        elif isinstance(text, str):
+            text_list = [text]
+        else:
+            raise TypeError(f"Unsupported text type: {type(text)}")
+
+        if not self.uncondition_mode:
+            if hidden_state_dict is None:
+                hidden_state_dict = self.encode_text({"text": text_list})
+            vtxt_input = hidden_state_dict["text_vec_raw"]
+            ctxt_input = hidden_state_dict["text_ctxt_raw"]
+            ctxt_length = hidden_state_dict["text_ctxt_raw_length"]
+            # check shape
+            if len(vtxt_input.shape) == 2 and len(ctxt_input.shape) == 2:
+                vtxt_input = vtxt_input[None].repeat(repeat, 1, 1)
+                ctxt_input = ctxt_input[None].repeat(repeat, 1, 1)
+                ctxt_length = ctxt_length.repeat(repeat)
+            ctxt_mask_temporal = length_to_mask(ctxt_length, ctxt_input.shape[1])
+            sources = None if not use_special_game_feat else ["Game"] * repeat
+            vtxt_input, ctxt_input, ctxt_mask_temporal = self._maybe_inject_source_token(
+                vtxt_input, ctxt_input, ctxt_mask_temporal, sources, trigger_sources={"Taobao", "Game"}
+            )
+        else:
+            vtxt_input = self.null_vtxt_feat.expand(repeat, 1, -1)
+            ctxt_input = self.null_ctxt_input.expand(repeat, 1, -1)
+            ctxt_length = torch.tensor([1]).expand(repeat)
+            ctxt_mask_temporal = length_to_mask(ctxt_length, ctxt_input.shape[1]).expand(repeat, -1)
+        assert len(vtxt_input.shape) == 3, f"vtxt_input.shape: {vtxt_input.shape}, should be (B, 1, D)"
+        assert len(ctxt_input.shape) == 3, f"ctxt_input.shape: {ctxt_input.shape}, should be (B, 1, D)"
+        assert len(ctxt_length.shape) == 1, f"ctxt_length.shape: {ctxt_length.shape}, should be (B,)"
+
+        ctxt_mask_temporal = length_to_mask(ctxt_length, ctxt_input.shape[1])
+
+        return {
+            "text": text,
+            "vtxt_input": vtxt_input,
+            "ctxt_input": ctxt_input,
+            "ctxt_length": ctxt_length,
+            "ctxt_mask_temporal": ctxt_mask_temporal,
+        }
+
+
 if __name__ == "__main__":
     # python -m hymotion.pipeline.motion_diffusion
     import time

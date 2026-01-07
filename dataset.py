@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-
+import joblib
 # 创建Dump Dataset类
 class DumpMotionDataset(Dataset):
     def __init__(self, num_samples=100000, motion_length=360, motion_dim=201, 
@@ -105,7 +105,9 @@ def test_dataloader():
 
 if __name__ == "__main__":
     # 测试数据加载器
-    test_dataloader()
+    # test_dataloader()
+    dataset_dict_raw = joblib.load("motionfix_test.pth.tar")
+    breakpoint()
     
     
     print("\n=== 使用说明 ===")
