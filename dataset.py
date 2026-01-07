@@ -106,7 +106,8 @@ def test_dataloader():
 if __name__ == "__main__":
     # 测试数据加载器
     # test_dataloader()
-    dataset_dict_raw = joblib.load("motionfix_test.pth.tar")
+    # dataset_dict_raw = joblib.load("motionfix_test_embeddings.pth.tar")
+    dataset = torch.load("motionfix_test_embeddings.pth.tar")
     breakpoint()
     
     

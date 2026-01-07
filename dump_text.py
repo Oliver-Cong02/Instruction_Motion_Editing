@@ -10,7 +10,7 @@ from hymotion.utils.t2m_runtime import T2MRuntime
 def process_single_embedding(
     runtime: T2MRuntime,
     key: str,
-    text: str,
+    data: dict,
     disable_rewrite: bool = False,
     disable_duration_est: bool = False,
 ) -> Dict[str, Any]:
@@ -20,6 +20,7 @@ def process_single_embedding(
     # print(f">>> Processing key: {key} | text: {text}")
 
     # 1. LLM 重写与时长预估逻辑 (保留原逻辑，如果不需要可以关掉)
+    text = data['text']
     call_llm = not disable_rewrite or not disable_duration_est
     
     if not call_llm:
@@ -33,7 +34,7 @@ def process_single_embedding(
             
     # 2. 调用核心 Embedding 生成函数 (你需要在 Runtime 中实现此方法)
     # 假设返回的是 Tensor 或 Numpy Array
-    embedding = runtime.generate_text_embedding(text=rewritten_text)
+    embedding = runtime.generate_text_embeddings(text=rewritten_text)
 
     if isinstance(embedding, torch.Tensor):
         embedding = embedding.detach().cpu()
@@ -42,7 +43,9 @@ def process_single_embedding(
         "key": key,
         "original_text": text,
         "rewritten_text": rewritten_text,
-        "text_embedding": embedding
+        "text_embedding": embedding,
+        "src_latent": data['src_latent'],
+        "tgt_latent": data['tgt_latent'],
     }
 
 
@@ -62,23 +65,19 @@ def run_parallel_embedding_tasks(
     print(f">>> Start processing {total_tasks} items...")
 
     if max_workers is None:
-        # 如果是计算密集型（LLM推理），worker数不宜过多；如果是IO密集型，可以多一点
         max_workers = max(1, len(runtime.device_ids) if runtime.device_ids else 1) * 2
 
-    # 提交任务
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        # 将字典转换为任务列表
         futures = {}
         for key, data in dataset_dict.items():
-            input_text = data.get('text', "")
-            if not input_text:
+            if not data.get('text', ""):
                 continue
                 
             fut = ex.submit(
                 process_single_embedding,
                 runtime=runtime,
                 key=key,
-                text=input_text,
+                data=data,
                 disable_rewrite=disable_rewrite,
                 disable_duration_est=disable_duration_est
             )
@@ -89,7 +88,7 @@ def run_parallel_embedding_tasks(
             key = futures[fut]
             try:
                 res = fut.result()
-                results_map[key] = res["text_embedding"]
+                results_map[key] = res
                 success_count += 1
                 
                 if i % 10 == 0:
@@ -141,8 +140,6 @@ def main():
         prompt_engineering_host=args.prompt_engineering_host,
         prompt_engineering_model_path=args.prompt_engineering_model_path,
     )
-
-    breakpoint()
 
     dataset_dict_raw = joblib.load(args.dataset_path)
 
