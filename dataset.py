@@ -7,18 +7,18 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import joblib
 
+from hymotion.pipeline.motion_diffusion import length_to_mask
+
 
 import torch
 from torch.utils.data import Dataset
 
 class MotionFixDataset(Dataset):
-    def __init__(self, dataset_path, max_motion_length=196, max_ctxt_len=128, vtxt_dim=768):
+    def __init__(self, dataset_path, max_x_len=360):
         self.data_dict = torch.load(dataset_path, map_location='cpu')
         
         self.keys = list(self.data_dict.keys())
-        self.max_motion_length = max_motion_length
-        self.max_ctxt_len = max_ctxt_len
-        self.vtxt_dim = vtxt_dim
+        self.max_x_len = max_x_len
 
     def __len__(self):
         return len(self.keys)
@@ -29,72 +29,54 @@ class MotionFixDataset(Dataset):
         
         text_input = item_data.get('rewritten_text', "")
         motion_latents = item_data['tgt_latent'].float()
-        breakpoint()
-        original_motion_length = motion_latents.shape[0]
-        motion_lengths = torch.tensor([original_motion_length])
 
         text_embedding = item_data['text_embedding']
         vtxt_input = text_embedding['vtxt_input'].float()
-        ctxt_input_raw = text_embedding['ctxt_input'].float()
+        ctxt_input = text_embedding['ctxt_input'].float()
         ctxt_length = text_embedding['ctxt_length']
-        ctxt_mask_temporal = text_embedding['ctxt_mask_temporal'].float()
-        
-        # 获取 embedding 的真实长度
-        valid_ctxt_len = ctxt_input_raw.shape[1]
-        
-        if valid_ctxt_len < self.max_ctxt_len:
-            padding = torch.zeros(self.max_ctxt_len - valid_ctxt_len, ctxt_input_raw.shape[1])
-            ctxt_input = torch.cat([ctxt_input_raw, padding], dim=0)
-            ctxt_mask_temporal = torch.cat([ctxt_mask_temporal, torch.zeros(1, self.max_ctxt_len - valid_ctxt_len)], dim=1)
-        else:
-            raise ValueError(f"Context length {valid_ctxt_len} exceeds max_ctxt_len {self.max_ctxt_len}")
-            ctxt_input = ctxt_input_raw[:self.max_ctxt_len]
 
-        # -----------------------------------------------------------
-        # 5. 映射 vtxt_input
-        # 源数据中没有 'vtxt_input'，为了保持结构一致，创建一个全0的占位符或随机张量
-        # DumpDataset 中形状是 (1, vtxt_dim)
-        vtxt_input = torch.zeros(1, self.vtxt_dim) 
+        ctxt_mask_temporal = length_to_mask(ctxt_length, ctxt_input.shape[1])
+
+        curr_len = motion_latents.shape[0]
+        dim = motion_latents.shape[1]
+        if curr_len < self.max_x_len:
+            pad_size = self.max_x_len - curr_len
+            padding = torch.zeros((pad_size, dim), dtype=motion_latents.dtype)
+            motion_latents = torch.cat([motion_latents, padding], dim=0)
+            x_length = torch.LongTensor([curr_len])
+        else:
+            raise ValueError(f"Motion length {curr_len} exceeds max_x_len {self.max_x_len}")
+        
+        x_mask_temporal = length_to_mask(x_length, self.max_x_len)
 
         return {
-            "text_inputs": text_input,            # str
-            "motion_latents": motion_latents,     # Tensor
-            "motion_lengths": motion_lengths,     # Tensor
-            "ctxt_input": ctxt_input,             # Tensor (padded)
-            "vtxt_input": vtxt_input,             # Tensor (placeholder)
-            "text_ctxt_raw_length": text_ctxt_raw_length # Tensor
+            "text_inputs": text_input,           
+            "x_latents": motion_latents, # (1, 120, 201)
+            "x_length": x_length, # (1,)
+            "x_mask_temporal": x_mask_temporal.squeeze(0), # (1, 120)
+            "ctxt_input": ctxt_input.squeeze(0),  # (1, 128, 4096)   
+            "vtxt_input": vtxt_input.squeeze(0), # (1, 1, 768)
+            "ctxt_mask_temporal": ctxt_mask_temporal.squeeze(0), # (1, 128)
         }
     
     def collate_fn(self, batch):
-        # 保持与 DumpMotionDataset 一致的逻辑
-        # 注意：如果 motion_latents 长度不一致，这里直接 stack 会报错。
-        # 通常需要 pad_sequence。为了严格仿照你的代码，这里保留 stack，
-        # 但在 __getitem__ 中你可能需要确保 motion 也是固定长度，或者在这里修改为 padding。
-        
         text_inputs = [item["text_inputs"] for item in batch]
-        
-        # 这里的 stack 假设所有 motion_latents 长度一致。
-        # 如果源数据长度不一，建议使用 torch.nn.utils.rnn.pad_sequence
-        try:
-            motion_latents = torch.stack([item["motion_latents"] for item in batch])
-        except RuntimeError:
-            # 如果长度不一致，自动退回到 padding 模式 (更健壮)
-            from torch.nn.utils.rnn import pad_sequence
-            motion_latents = pad_sequence([item["motion_latents"] for item in batch], batch_first=True)
-
-        motion_lengths = torch.cat([item["motion_lengths"] for item in batch])
+        x_latents = torch.stack([item["x_latents"] for item in batch])
+        x_length = torch.cat([item["x_length"] for item in batch])
+        x_mask_temporal = torch.stack([item["x_mask_temporal"] for item in batch])
         
         ctxt_input = torch.stack([item["ctxt_input"] for item in batch])
         vtxt_input = torch.stack([item["vtxt_input"] for item in batch])
-        ctxt_length = torch.cat([item["text_ctxt_raw_length"] for item in batch])
+        ctxt_mask_temporal = torch.stack([item["ctxt_mask_temporal"] for item in batch])
         
         return {
             "text_inputs": text_inputs,
-            "motion_latents": motion_latents,
-            "motion_lengths": motion_lengths,
+            "x_latents": x_latents,
+            "x_length": x_length,
+            "x_mask_temporal": x_mask_temporal,
             "ctxt_input": ctxt_input,
             "vtxt_input": vtxt_input,
-            "text_ctxt_raw_length": ctxt_length
+            "ctxt_mask_temporal": ctxt_mask_temporal,
         }
 
 
@@ -203,10 +185,17 @@ if __name__ == "__main__":
 
     dataset_path = "/opt/tiger/VIVA/Instruction_Motion_Editing/motionfix_test_embeddings.pt"
     dataset = MotionFixDataset(dataset_path)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, collate_fn=dataset.collate_fn)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=dataset.collate_fn)
 
-    for idx, data in enumerate(dataset):
-        pass
+    for idx, data in enumerate(dataloader):
+        print(f"Batch {idx + 1}:")
+        print(f"  text_inputs: {data['text_inputs']}")
+        print(f"  motion_latents.shape: {data['x_latents'].shape}")
+        print(f"  motion_lengths.shape: {data['x_length'].shape}")
+        print(f"  ctxt_input.shape: {data['ctxt_input'].shape}")
+        print(f"  vtxt_input.shape: {data['vtxt_input'].shape}")
+        print(f"  x_mask_temporal.shape: {data['x_mask_temporal'].shape}")
+        print(f"  ctxt_mask_temporal.shape: {data['ctxt_mask_temporal'].shape}")
     
     
     print("\n=== 使用说明 ===")

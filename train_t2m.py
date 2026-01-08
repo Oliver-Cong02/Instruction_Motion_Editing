@@ -65,105 +65,84 @@ def get_sigmas(noise_scheduler, device, timesteps, n_dim=4, dtype=torch.float32)
     return sigma
 
 
-def train_one_step(
+def process_batch(
     pipeline,
-    optimizer,
-    lr_scheduler,
-    loader,
+    batch,
     noise_scheduler,
     noise_random_generator,
-    gradient_accumulation_steps,
-    max_grad_norm,
     weighting_scheme,
     logit_mean,
     logit_std,
     mode_scale,
     cond_mask_prob=0.1,
 ):
-    total_loss = 0.0
-    optimizer.zero_grad()
+    """
+    处理单个 Batch 的前向传播和 Loss 计算
+    """
+    text_inputs = batch["text_inputs"]
+    x_latents = batch["x_latents"]
+    x_length = batch["x_length"]
+    x_mask_temporal = batch["x_mask_temporal"]
+    ctxt_input = batch["ctxt_input"]
+    vtxt_input = batch["vtxt_input"]
+    ctxt_mask_temporal = batch["ctxt_mask_temporal"]
     
-    for _ in range(gradient_accumulation_steps):
-        # Load batch data
-        batch = next(loader)
-        text_inputs = batch["text_inputs"]
-        motion_latents = batch["motion_latents"]
-        motion_lengths = batch["motion_lengths"]
-        ctxt_input = batch["ctxt_input"]
-        vtxt_input = batch["vtxt_input"]
-        ctxt_length = batch["text_ctxt_raw_length"]
-        
-        model_device = next(pipeline.motion_transformer.parameters()).device
-        motion_latents = motion_latents.to(device=model_device, non_blocking=True)
-        motion_lengths = motion_lengths.to(device=model_device, non_blocking=True)
-        ctxt_input = ctxt_input.to(device=model_device, non_blocking=True)
-        vtxt_input = vtxt_input.to(device=model_device, non_blocking=True)
-        ctxt_length = ctxt_length.to(device=model_device, non_blocking=True)
+    device = next(pipeline.motion_transformer.parameters()).device
+    x_latents = x_latents.to(device=device, non_blocking=True)
+    x_length = x_length.to(device=device, non_blocking=True)
+    x_mask_temporal = x_mask_temporal.to(device=device, non_blocking=True)
+    ctxt_input = ctxt_input.to(device=device, non_blocking=True)
+    vtxt_input = vtxt_input.to(device=device, non_blocking=True)
+    ctxt_mask_temporal = ctxt_mask_temporal.to(device=device, non_blocking=True)
 
-        batch_size = motion_latents.shape[0]
-        device = model_device
-        
-        # Create noise and sample timesteps in [0, 1]
-        noise = torch.randn_like(motion_latents)
-        u = compute_density_for_timestep_sampling(
-            weighting_scheme=weighting_scheme,
-            batch_size=batch_size,
-            generator=noise_random_generator,
-            logit_mean=logit_mean,
-            logit_std=logit_std,
-            mode_scale=mode_scale,
+    batch_size = x_latents.shape[0]
+    
+    # Create noise and sample timesteps in [0, 1]
+    noise = torch.randn_like(x_latents)
+    u = compute_density_for_timestep_sampling(
+        weighting_scheme=weighting_scheme,
+        batch_size=batch_size,
+        generator=noise_random_generator,
+        logit_mean=logit_mean,
+        logit_std=logit_std,
+        mode_scale=mode_scale,
+    )
+    indices = (u * noise_scheduler.config.num_train_timesteps).long()
+    timesteps = noise_scheduler.timesteps[indices].to(device=device)
+    sigmas = get_sigmas(
+        noise_scheduler,
+        device,
+        timesteps,
+        n_dim=x_latents.ndim,
+        dtype=x_latents.dtype,
+    )
+
+    noisy_x_latents = (1.0 - sigmas) * x_latents + sigmas * noise
+
+    # Prepare text features
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        if cond_mask_prob > 0.0:
+            mask = torch.rand(batch_size, device=device) < cond_mask_prob
+            if mask.any():
+                vtxt_input[mask] = pipeline.null_vtxt_feat.to(device=device).expand(mask.sum(), -1, -1)
+                if pipeline.enable_ctxt_null_feat:
+                    ctxt_input[mask] = pipeline.null_ctxt_input.to(device=device).expand(mask.sum(), -1, -1)
+
+        model_pred = pipeline.motion_transformer(
+            x=noisy_x_latents,
+            ctxt_input=ctxt_input,
+            vtxt_input=vtxt_input,
+            timesteps=timesteps,
+            x_mask_temporal=x_mask_temporal,
+            ctxt_mask_temporal=ctxt_mask_temporal,
         )
-        indices = (u * noise_scheduler.config.num_train_timesteps).long()
-        timesteps = noise_scheduler.timesteps[indices].to(device=motion_latents.device)
 
-        sigmas = get_sigmas(
-            noise_scheduler,
-            motion_latents.device,
-            timesteps,
-            n_dim=motion_latents.ndim,
-            dtype=motion_latents.dtype,
-        )
-        noisy_motion_latents = (1.0 - sigmas) * motion_latents + sigmas * noise
+        target = noise - x_latents
 
-        # Prepare text features
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            if cond_mask_prob > 0.0:
-                mask = torch.rand(batch_size, device=device) < cond_mask_prob
-                if mask.any():
-                    vtxt_input[mask] = pipeline.null_vtxt_feat.to(device=device).expand(mask.sum(), -1, -1)
-                    if pipeline.enable_ctxt_null_feat:
-                        ctxt_input[mask] = pipeline.null_ctxt_input.to(device=device).expand(mask.sum(), -1, -1)
-
-            # Create masks
-            ctxt_mask_temporal = length_to_mask(ctxt_length, ctxt_input.shape[1])
-            x_mask_temporal = length_to_mask(motion_lengths, pipeline.train_frames)
-            
-            # Forward pass through the model
-            model_pred = pipeline.motion_transformer(
-                x=noisy_motion_latents,
-                ctxt_input=ctxt_input,
-                vtxt_input=vtxt_input,
-                timesteps=timesteps,
-                x_mask_temporal=x_mask_temporal,
-                ctxt_mask_temporal=ctxt_mask_temporal,
-            )
-
-            target = noise - motion_latents
-
-            loss = (torch.mean((model_pred.float() - target.float())**2) / gradient_accumulation_steps)
-        
-        loss.backward()
-        
-        avg_loss = loss.detach().clone()
-        dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
-        total_loss += avg_loss.item()
+        # Loss calculation (Standard MSE)
+        loss = torch.mean((model_pred.float() - target.float())**2)
     
-    # Gradient clipping and optimizer step
-    grad_norm = torch.nn.utils.clip_grad_norm_(pipeline.motion_transformer.parameters(), max_grad_norm)
-    optimizer.step()
-    lr_scheduler.step()
-    
-    return total_loss, grad_norm.item()
+    return loss
 
 
 def main(args):
@@ -188,7 +167,7 @@ def main(args):
     # Load config
     config = read_config(args.config_path)
     
-    # Initialize pipeline using load_object (following t2m_runtime.py pattern)
+    # Initialize pipeline
     pipeline = load_object(
         config["train_pipeline"],
         config["train_pipeline_args"],
@@ -203,22 +182,21 @@ def main(args):
     
     # Move pipeline to device
     pipeline.to(device)
-    # 1. 先冻结 Pipeline 中的所有参数
+    # 1. Freeze Pipeline
     pipeline.requires_grad_(False) 
-
-    # 2. 单独解冻 motion_transformer 的参数
+    # 2. Unfreeze motion_transformer
     pipeline.motion_transformer.requires_grad_(True)
-    # Set model to train mode
+    
     pipeline.eval()
     pipeline.motion_transformer.train()
 
     noise_scheduler = FlowMatchEulerDiscreteScheduler()
 
-    
     # Print model information
-    print(
-        f"  Total training parameters = {sum(p.numel() for p in pipeline.motion_transformer.parameters() if p.requires_grad) / 1e6} M"
-    )
+    if rank == 0:
+        print(
+            f"  Total training parameters = {sum(p.numel() for p in pipeline.motion_transformer.parameters() if p.requires_grad) / 1e6} M"
+        )
     
     # Setup optimizer and scheduler
     params_to_optimize = filter(lambda p: p.requires_grad, pipeline.motion_transformer.parameters())
@@ -230,18 +208,9 @@ def main(args):
         eps=1e-8,
     )
     
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps,
-        num_training_steps=args.max_train_steps,
-        num_cycles=args.lr_num_cycles,
-        power=args.lr_power,
-    )
-    
     # Load dataset
-    from dataset import DumpMotionDataset
-    dataset = DumpMotionDataset()
+    from dataset import MotionFixDataset
+    dataset = MotionFixDataset(args.dataset_path)
     
     sampler = DistributedSampler(
         dataset,
@@ -260,9 +229,24 @@ def main(args):
         drop_last=True,
     )
     
-    # Calculate training epochs
+    # Calculate training steps/epochs logic
+    # 这里的逻辑修改：优先使用 args.num_train_epochs
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    if args.max_train_steps is None:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    else:
+        # 如果指定了 max_train_steps，重新计算 epoch 只是为了打印信息，但循环将由 epochs 控制
+        # 建议用户如果想跑固定 Epoch，就不要传 max_train_steps 或者让其自动计算
+        pass 
+
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps,
+        num_training_steps=args.max_train_steps,
+        num_cycles=args.lr_num_cycles,
+        power=args.lr_power,
+    )
     
     # Initialize wandb for logging
     if rank == 0 and args.use_wandb:
@@ -271,98 +255,135 @@ def main(args):
     
     # Print training information
     total_batch_size = world_size * args.train_batch_size * args.gradient_accumulation_steps
-    print("***** Running training *****")
-    print(f"  Num examples = {len(dataset)}")
-    print(f"  Dataloader size = {len(train_dataloader)}")
-    print(f"  Num Epochs = {args.num_train_epochs}")
-    print(f"  Instantaneous batch size per device = {args.train_batch_size}")
-    print(f"  Total train batch size (w. data parallel, accumulation) = {total_batch_size}")
-    print(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    print(f"  Total optimization steps = {args.max_train_steps}")
+    if rank == 0:
+        print("***** Running training *****")
+        print(f"  Num examples = {len(dataset)}")
+        print(f"  Num Epochs = {args.num_train_epochs}")
+        print(f"  Instantaneous batch size per device = {args.train_batch_size}")
+        print(f"  Total train batch size (w. parallel, accum) = {total_batch_size}")
+        print(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        print(f"  Total optimization steps = {args.max_train_steps}")
     
-    # Training loop
+    # Training variables
+    global_step = 0
+    step_times = deque(maxlen=100)
+    cond_mask_prob = pipeline.train_cfg.get("cond_mask_prob", 0.1)
+    
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=0,
         desc="Steps",
         disable=local_rank > 0,
     )
-    
-    loader = iter(train_dataloader)
-    step_times = deque(maxlen=100)
-    
-    # Get conditional mask probability from train_cfg if available
-    cond_mask_prob = pipeline.train_cfg.get("cond_mask_prob", 0.1)
-    
-    for step in range(1, args.max_train_steps + 1):
-        start_time = time.perf_counter()
+
+    # --- EPOCH LOOP START ---
+    for epoch in range(args.num_train_epochs):
+        # 重要：DistributedSampler 需要在每个 epoch 开始时设置 epoch，以确保 shuffle 不同
+        train_dataloader.sampler.set_epoch(epoch)
         
-        # Train one step
-        loss, grad_norm = train_one_step(
-            pipeline,
-            optimizer,
-            lr_scheduler,
-            loader,
-            noise_scheduler,
-            noise_random_generator,
-            args.gradient_accumulation_steps,
-            args.max_grad_norm,
-            args.weighting_scheme,
-            args.logit_mean,
-            args.logit_std,
-            args.mode_scale,
-            cond_mask_prob=cond_mask_prob,
-        )
+        # 遍历数据集
+        for step, batch in enumerate(train_dataloader):
+            start_time = time.perf_counter()
+            
+            # 1. Forward and Backward
+            # 梯度累积：在 backward 之前，不进行 optimizer step
+            # 如果是 DDP，通常模型会自动处理 sync，但在梯度累积时，有时需要 `no_sync` context，
+            # 这里的简单实现让 DDP 自己处理（虽然稍微低效一点，因为每步都通信梯度，但逻辑正确）
+            
+            loss = process_batch(
+                pipeline,
+                batch,
+                noise_scheduler,
+                noise_random_generator,
+                args.weighting_scheme,
+                args.logit_mean,
+                args.logit_std,
+                args.mode_scale,
+                cond_mask_prob=cond_mask_prob,
+            )
+            
+            # Scale loss for gradient accumulation
+            loss = loss / args.gradient_accumulation_steps
+            loss.backward()
+            
+            # Log loss (accumulate average for display)
+            # 注意：这里的 loss 已经被除以了 accumulation_steps
+            avg_loss = loss.detach().clone()
+            dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
+            current_loss = avg_loss.item() * args.gradient_accumulation_steps # 还原用于显示的数值
+            
+            # 2. Optimizer Step (Every `gradient_accumulation_steps`)
+            if (step + 1) % args.gradient_accumulation_steps == 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    pipeline.motion_transformer.parameters(), args.max_grad_norm
+                )
+                
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                
+                global_step += 1
+                
+                # Timing
+                step_time = time.perf_counter() - start_time
+                step_times.append(step_time)
+                avg_step_time = sum(step_times) / len(step_times)
+                
+                # Update progress bar
+                progress_bar.set_postfix({
+                    "epoch": epoch,
+                    "loss": f"{current_loss:.4f}",
+                    "lr": f"{lr_scheduler.get_last_lr()[0]:.2e}",
+                    "grad": f"{grad_norm:.2f}",
+                })
+                progress_bar.update(1)
+                
+                # Log to wandb
+                if rank == 0 and args.use_wandb:
+                    wandb.log({
+                        "train_loss": current_loss,
+                        "learning_rate": lr_scheduler.get_last_lr()[0],
+                        "epoch": epoch,
+                        "global_step": global_step,
+                        "step_time": step_time,
+                        "grad_norm": grad_norm.item(),
+                    }, step=global_step)
+                
+                # Save checkpoint (Based on global step)
+                if global_step % args.checkpointing_steps == 0:
+                    checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{global_step}.pt")
+                    if rank == 0:
+                        torch.save({
+                            "epoch": epoch,
+                            "step": global_step,
+                            "model_state_dict": pipeline.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+                            "loss": current_loss,
+                        }, checkpoint_path)
+                    dist.barrier()
+                
+                # Validation (Based on global step)
+                if args.validate and global_step % args.validation_steps == 0:
+                    pipeline.eval()
+                    # validation logic here
+                    pipeline.train()
+            
+            # Check if we reached max steps (optional safeguard)
+            if global_step >= args.max_train_steps:
+                break
         
-        step_time = time.perf_counter() - start_time
-        step_times.append(step_time)
-        avg_step_time = sum(step_times) / len(step_times)
-        
-        # Update progress bar
-        progress_bar.set_postfix({
-            "loss": f"{loss:.4f}",
-            "step_time": f"{step_time:.2f}s",
-            "grad_norm": grad_norm,
-        })
-        progress_bar.update(1)
-        
-        # Log to wandb
-        if rank == 0 and args.use_wandb:
-            wandb.log({
-                "train_loss": loss,
-                "learning_rate": lr_scheduler.get_last_lr()[0],
-                "step_time": step_time,
-                "avg_step_time": avg_step_time,
-                "grad_norm": grad_norm,
-            }, step=step)
-        
-        # Save checkpoint
-        if step % args.checkpointing_steps == 0:
-            checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{step}.pt")
-            if rank == 0:
-                torch.save({
-                    "step": step,
-                    "model_state_dict": pipeline.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-                    "loss": loss,
-                }, checkpoint_path)
-            dist.barrier()
-        
-        # Validate
-        if args.validate and step % args.validation_steps == 0:
-            # Implement validation logic here
-            pipeline.eval()
-            with torch.no_grad():
-                # Run validation generation
-                pass
-            pipeline.train()
+        if global_step >= args.max_train_steps:
+            break
+            
+    # --- EPOCH LOOP END ---
     
     # Save final checkpoint
     if rank == 0:
         final_checkpoint_path = os.path.join(args.output_dir, "checkpoint_final.pt")
         torch.save({
-            "step": args.max_train_steps,
+            "epoch": args.num_train_epochs,
+            "step": global_step,
             "model_state_dict": pipeline.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "lr_scheduler_state_dict": lr_scheduler.state_dict(),
@@ -379,11 +400,15 @@ if __name__ == "__main__":
     parser.add_argument("--pretrained_model_path", type=str, default=None, help="Path to pretrained model checkpoint")
     
     # Dataset
+    parser.add_argument("--dataset_path", type=str, required=True, help="Path to dataset directory")
+    
+    # Dataloader
     parser.add_argument("--dataloader_num_workers", type=int, default=4, help="Number of data loader workers")
     
     # Training parameters
     parser.add_argument("--train_batch_size", type=int, default=8, help="Batch size per device")
-    parser.add_argument("--max_train_steps", type=int, default=100000, help="Total number of training steps")
+    parser.add_argument("--num_train_epochs", type=int, default=10, help="Number of training epochs") # 新增：默认Epoch数
+    parser.add_argument("--max_train_steps", type=int, default=1000000, help="Total number of training steps (optional, overrides epochs if smaller)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
     
     # Optimizer and scheduler
@@ -416,4 +441,3 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     main(args)
-
