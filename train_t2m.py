@@ -80,7 +80,8 @@ def process_batch(
     处理单个 Batch 的前向传播和 Loss 计算
     """
     text_inputs = batch["text_inputs"]
-    x_latents = batch["x_latents"]
+    src_x_latents = batch["src_x_latents"]
+    tgt_x_latents = batch["tgt_x_latents"]
     x_length = batch["x_length"]
     x_mask_temporal = batch["x_mask_temporal"]
     ctxt_input = batch["ctxt_input"]
@@ -88,17 +89,18 @@ def process_batch(
     ctxt_mask_temporal = batch["ctxt_mask_temporal"]
     
     device = next(pipeline.motion_transformer.parameters()).device
-    x_latents = x_latents.to(device=device, non_blocking=True)
+    src_x_latents = src_x_latents.to(device=device, non_blocking=True)
+    tgt_x_latents = tgt_x_latents.to(device=device, non_blocking=True)
     x_length = x_length.to(device=device, non_blocking=True)
     x_mask_temporal = x_mask_temporal.to(device=device, non_blocking=True)
     ctxt_input = ctxt_input.to(device=device, non_blocking=True)
     vtxt_input = vtxt_input.to(device=device, non_blocking=True)
     ctxt_mask_temporal = ctxt_mask_temporal.to(device=device, non_blocking=True)
 
-    batch_size = x_latents.shape[0]
+    batch_size = tgt_x_latents.shape[0]
     
     # Create noise and sample timesteps in [0, 1]
-    noise = torch.randn_like(x_latents)
+    noise = torch.randn_like(tgt_x_latents)
     u = compute_density_for_timestep_sampling(
         weighting_scheme=weighting_scheme,
         batch_size=batch_size,
@@ -113,11 +115,11 @@ def process_batch(
         noise_scheduler,
         device,
         timesteps,
-        n_dim=x_latents.ndim,
-        dtype=x_latents.dtype,
+        n_dim=tgt_x_latents.ndim,
+        dtype=tgt_x_latents.dtype,
     )
 
-    noisy_x_latents = (1.0 - sigmas) * x_latents + sigmas * noise
+    noisy_tgt_x_latents = (1.0 - sigmas) * tgt_x_latents + sigmas * noise
 
     # Prepare text features
     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -129,7 +131,8 @@ def process_batch(
                     ctxt_input[mask] = pipeline.null_ctxt_input.to(device=device).expand(mask.sum(), -1, -1)
 
         model_pred = pipeline.motion_transformer(
-            x=noisy_x_latents,
+            x=noisy_tgt_x_latents,
+            src_x=src_x_latents,
             ctxt_input=ctxt_input,
             vtxt_input=vtxt_input,
             timesteps=timesteps,
@@ -137,7 +140,7 @@ def process_batch(
             ctxt_mask_temporal=ctxt_mask_temporal,
         )
 
-        target = noise - x_latents
+        target = noise - tgt_x_latents
 
         # Loss calculation (Standard MSE)
         loss = torch.mean((model_pred.float() - target.float())**2)

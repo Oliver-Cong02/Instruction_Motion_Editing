@@ -28,7 +28,8 @@ class MotionFixDataset(Dataset):
         item_data = self.data_dict[item_key]
         
         text_input = item_data.get('rewritten_text', "")
-        motion_latents = item_data['tgt_latent'].float()
+        tgt_motion_latents = item_data['tgt_latent'].float()
+        src_motion_latents = item_data['src_latent'].float()
 
         text_embedding = item_data['text_embedding']
         vtxt_input = text_embedding['vtxt_input'].float()
@@ -37,12 +38,19 @@ class MotionFixDataset(Dataset):
 
         ctxt_mask_temporal = length_to_mask(ctxt_length, ctxt_input.shape[1])
 
-        curr_len = motion_latents.shape[0]
-        dim = motion_latents.shape[1]
+        curr_len = min(tgt_motion_latents.shape[0], src_motion_latents.shape[0])
+        tgt_motion_latents = tgt_motion_latents[:curr_len]
+        src_motion_latents = src_motion_latents[:curr_len]
+        # print("src_motion_latents.shape:", src_motion_latents.shape)
+        # print("tgt_motion_latents.shape:", tgt_motion_latents.shape)
+        # assert src_motion_latents.shape == tgt_motion_latents.shape
+        
+        dim = tgt_motion_latents.shape[1]
         if curr_len < self.max_x_len:
             pad_size = self.max_x_len - curr_len
-            padding = torch.zeros((pad_size, dim), dtype=motion_latents.dtype)
-            motion_latents = torch.cat([motion_latents, padding], dim=0)
+            padding = torch.zeros((pad_size, dim), dtype=tgt_motion_latents.dtype)
+            tgt_motion_latents = torch.cat([tgt_motion_latents, padding], dim=0)
+            src_motion_latents = torch.cat([src_motion_latents, padding], dim=0)
             x_length = torch.LongTensor([curr_len])
         else:
             raise ValueError(f"Motion length {curr_len} exceeds max_x_len {self.max_x_len}")
@@ -51,7 +59,8 @@ class MotionFixDataset(Dataset):
 
         return {
             "text_inputs": text_input,           
-            "x_latents": motion_latents, # (1, 120, 201)
+            "src_x_latents": src_motion_latents, # (1, 120, 201)
+            "tgt_x_latents": tgt_motion_latents, # (1, 120, 201)
             "x_length": x_length, # (1,)
             "x_mask_temporal": x_mask_temporal.squeeze(0), # (1, 120)
             "ctxt_input": ctxt_input.squeeze(0),  # (1, 128, 4096)   
@@ -61,7 +70,8 @@ class MotionFixDataset(Dataset):
     
     def collate_fn(self, batch):
         text_inputs = [item["text_inputs"] for item in batch]
-        x_latents = torch.stack([item["x_latents"] for item in batch])
+        src_x_latents = torch.stack([item["src_x_latents"] for item in batch])
+        tgt_x_latents = torch.stack([item["tgt_x_latents"] for item in batch])
         x_length = torch.cat([item["x_length"] for item in batch])
         x_mask_temporal = torch.stack([item["x_mask_temporal"] for item in batch])
         
@@ -71,7 +81,8 @@ class MotionFixDataset(Dataset):
         
         return {
             "text_inputs": text_inputs,
-            "x_latents": x_latents,
+            "src_x_latents": src_x_latents,
+            "tgt_x_latents": tgt_x_latents,
             "x_length": x_length,
             "x_mask_temporal": x_mask_temporal,
             "ctxt_input": ctxt_input,
@@ -185,12 +196,13 @@ if __name__ == "__main__":
 
     dataset_path = "/opt/tiger/VIVA/Instruction_Motion_Editing/motionfix_test_embeddings.pt"
     dataset = MotionFixDataset(dataset_path)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, collate_fn=dataset.collate_fn)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, collate_fn=dataset.collate_fn)
 
     for idx, data in enumerate(dataloader):
         print(f"Batch {idx + 1}:")
         print(f"  text_inputs: {data['text_inputs']}")
-        print(f"  motion_latents.shape: {data['x_latents'].shape}")
+        print(f"  src_x_latents.shape: {data['src_x_latents'].shape}")
+        print(f"  tgt_x_latents.shape: {data['tgt_x_latents'].shape}")
         print(f"  motion_lengths.shape: {data['x_length'].shape}")
         print(f"  ctxt_input.shape: {data['ctxt_input'].shape}")
         print(f"  vtxt_input.shape: {data['vtxt_input'].shape}")

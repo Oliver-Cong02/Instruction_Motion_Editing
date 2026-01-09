@@ -352,6 +352,10 @@ class HunyuanMotionMMDiT(nn.Module):
             self.long_skip_net = FinalLayer(feat_dim=feat_dim, out_dim=feat_dim, act_type="silu")
 
         self.input_encoder = nn.Linear(in_features=input_dim, out_features=feat_dim)
+
+        self.ref_input_encoder = nn.Linear(in_features=input_dim, out_features=feat_dim)
+        self.ref_img_projector = nn.Linear(in_features=feat_dim * 2, out_features=feat_dim)
+
         self.ctxt_encoder = nn.Linear(in_features=ctxt_input_dim, out_features=feat_dim)
         self.vtxt_encoder = MLPEncoder(in_dim=vtxt_input_dim, feat_dim=feat_dim, num_layers=2, act_type="silu")
         self.timestep_encoder = TimestepEmbeddingEncoder(
@@ -409,6 +413,7 @@ class HunyuanMotionMMDiT(nn.Module):
     def forward(
         self,
         x: Tensor,
+        src_x: Tensor,
         ctxt_input: Tensor,
         vtxt_input: Tensor,
         timesteps: Tensor,
@@ -419,6 +424,10 @@ class HunyuanMotionMMDiT(nn.Module):
         device = get_module_device(self)
 
         motion_feat = self.input_encoder(x)
+        src_motion_feat = self.ref_input_encoder(src_x)
+
+        motion_feat = self.ref_img_projector(torch.cat([motion_feat, src_motion_feat], dim=-1))
+
         if self.with_long_skip_connection:
             origin_feat = motion_feat
         if self.insert_start_token:
