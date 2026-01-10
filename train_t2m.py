@@ -233,14 +233,16 @@ def main(args):
     )
     
     # Calculate training steps/epochs logic
-    # 这里的逻辑修改：优先使用 args.num_train_epochs
+    # 优先使用 args.num_train_epochs
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
+        # 如果max_train_steps是None，使用epochs计算
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     else:
-        # 如果指定了 max_train_steps，重新计算 epoch 只是为了打印信息，但循环将由 epochs 控制
-        # 建议用户如果想跑固定 Epoch，就不要传 max_train_steps 或者让其自动计算
-        pass 
+        # 如果用户明确指定了max_train_steps，使用它并计算对应的epochs（仅用于显示）
+        calculated_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+        if rank == 0:
+            print(f"  Warning: max_train_steps={args.max_train_steps} specified, will train for approximately {calculated_epochs} epochs") 
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -272,8 +274,10 @@ def main(args):
     step_times = deque(maxlen=100)
     cond_mask_prob = pipeline.train_cfg.get("cond_mask_prob", 0.1)
     
+    # Calculate total steps for progress bar (use the actual max_train_steps)
+    total_steps = args.max_train_steps
     progress_bar = tqdm(
-        range(0, args.max_train_steps),
+        total=total_steps,
         initial=0,
         desc="Steps",
         disable=local_rank > 0,
@@ -281,18 +285,12 @@ def main(args):
 
     # --- EPOCH LOOP START ---
     for epoch in range(args.num_train_epochs):
-        # 重要：DistributedSampler 需要在每个 epoch 开始时设置 epoch，以确保 shuffle 不同
         train_dataloader.sampler.set_epoch(epoch)
         
-        # 遍历数据集
         for step, batch in enumerate(train_dataloader):
             start_time = time.perf_counter()
             
             # 1. Forward and Backward
-            # 梯度累积：在 backward 之前，不进行 optimizer step
-            # 如果是 DDP，通常模型会自动处理 sync，但在梯度累积时，有时需要 `no_sync` context，
-            # 这里的简单实现让 DDP 自己处理（虽然稍微低效一点，因为每步都通信梯度，但逻辑正确）
-            
             loss = process_batch(
                 pipeline,
                 batch,
@@ -310,10 +308,9 @@ def main(args):
             loss.backward()
             
             # Log loss (accumulate average for display)
-            # 注意：这里的 loss 已经被除以了 accumulation_steps
             avg_loss = loss.detach().clone()
             dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
-            current_loss = avg_loss.item() * args.gradient_accumulation_steps # 还原用于显示的数值
+            current_loss = avg_loss.item() * args.gradient_accumulation_steps 
             
             # 2. Optimizer Step (Every `gradient_accumulation_steps`)
             if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -411,7 +408,7 @@ if __name__ == "__main__":
     # Training parameters
     parser.add_argument("--train_batch_size", type=int, default=8, help="Batch size per device")
     parser.add_argument("--num_train_epochs", type=int, default=10, help="Number of training epochs") # 新增：默认Epoch数
-    parser.add_argument("--max_train_steps", type=int, default=1000000, help="Total number of training steps (optional, overrides epochs if smaller)")
+    parser.add_argument("--max_train_steps", type=int, default=None, help="Total number of training steps (optional, if None will use num_train_epochs)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
     
     # Optimizer and scheduler
