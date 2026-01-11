@@ -186,7 +186,11 @@ class MotionGeneration(torch.nn.Module):
                 warnings.warn(f"Checkpoint {ckpt_name} not found, skipping model loading")
             else:
                 checkpoint = torch.load(ckpt_name, map_location="cpu", weights_only=False)
-                self.load_state_dict(checkpoint["model_state_dict"], strict=False)
+                missing_keys, unexpected_keys = self.load_state_dict(checkpoint["model_state_dict"], strict=False)
+                if len(missing_keys) > 0:
+                    print(f"Missing keys: {missing_keys}")
+                if len(unexpected_keys) > 0:
+                    print(f"Unexpected keys: {unexpected_keys}")
         self.motion_transformer.eval()
         if build_text_encoder and not self.uncondition_mode:
             self.text_encoder = load_object(self._text_encoder_module, self._text_encoder_cfg)

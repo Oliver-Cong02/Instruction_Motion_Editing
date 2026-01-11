@@ -168,7 +168,7 @@ def main(args):
         os.makedirs(args.output_dir, exist_ok=True)
     
     # Load config
-    config = read_config(args.config_path)
+    config = read_config(os.path.join(args.pretrained_model_path, "config.yml"))
     
     # Initialize pipeline
     pipeline = load_object(
@@ -180,8 +180,14 @@ def main(args):
 
     # Load pretrained weights if specified
     if args.pretrained_model_path:
-        checkpoint = torch.load(args.pretrained_model_path, map_location="cpu")
-        pipeline.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        checkpoint = torch.load(os.path.join(args.pretrained_model_path, "latest.ckpt"), map_location="cpu")
+        missing_keys, unexpected_keys = pipeline.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        if rank == 0:
+            if len(missing_keys) > 0:
+                print(f"Missing keys: {missing_keys}")
+            if len(unexpected_keys) > 0:
+                print(f"Unexpected keys: {unexpected_keys}")
+
     
     # Move pipeline to device
     pipeline.to(device)
@@ -195,7 +201,6 @@ def main(args):
 
     noise_scheduler = FlowMatchEulerDiscreteScheduler()
 
-    # Print model information
     if rank == 0:
         print(
             f"  Total training parameters = {sum(p.numel() for p in pipeline.motion_transformer.parameters() if p.requires_grad) / 1e6} M"
@@ -353,14 +358,19 @@ def main(args):
                 if global_step % args.checkpointing_steps == 0:
                     checkpoint_path = os.path.join(args.output_dir, f"checkpoint_{global_step}.pt")
                     if rank == 0:
+                        # Move model state dict to CPU to save GPU memory
+                        model_state_dict = {k: v.cpu() for k, v in pipeline.state_dict().items()}
+                        
                         torch.save({
                             "epoch": epoch,
                             "step": global_step,
-                            "model_state_dict": pipeline.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
+                            "model_state_dict": model_state_dict,
+                            "optimizer_state_dict": optimizer.state_dict(),  # PyTorch handles serialization
                             "lr_scheduler_state_dict": lr_scheduler.state_dict(),
                             "loss": current_loss,
+                            "config": config,  # Save config for reproducibility
                         }, checkpoint_path)
+                        print(f"Checkpoint saved: {checkpoint_path}")
                     dist.barrier()
                 
                 # Validation (Based on global step)
@@ -381,13 +391,18 @@ def main(args):
     # Save final checkpoint
     if rank == 0:
         final_checkpoint_path = os.path.join(args.output_dir, "checkpoint_final.pt")
+        # Move model state dict to CPU to save GPU memory
+        model_state_dict = {k: v.cpu() for k, v in pipeline.state_dict().items()}
+        
         torch.save({
             "epoch": args.num_train_epochs,
             "step": global_step,
-            "model_state_dict": pipeline.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
+            "model_state_dict": model_state_dict,
+            "optimizer_state_dict": optimizer.state_dict(),  # PyTorch handles serialization
             "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+            "config": config,  # Save config for reproducibility
         }, final_checkpoint_path)
+        print(f"Final checkpoint saved: {final_checkpoint_path}")
     
     dist.destroy_process_group()
 
@@ -396,8 +411,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train T2MRuntime (MotionFlowMatching) model")
     
     # Config and model
-    parser.add_argument("--config_path", type=str, required=True, help="Path to model configuration file")
-    parser.add_argument("--pretrained_model_path", type=str, default=None, help="Path to pretrained model checkpoint")
+    parser.add_argument("--pretrained_model_path", type=str, required=True, help="Path to pretrained model checkpoint")
     
     # Dataset
     parser.add_argument("--dataset_path", type=str, required=True, help="Path to dataset directory")
